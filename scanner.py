@@ -355,14 +355,23 @@ def run_nikto(target: str, outdir: Path, fast: bool = False, user_agent: str = N
         time.sleep(delay)
     out = outdir / "nikto.txt"
     host = target if re.match(r'https?://', target) else f"http://{target}"
-    cmd = ["nikto", "-h", host, "-nointeractive"]
+    
+    # Use faster options to reduce scan time
+    cmd = ["nikto", "-h", host, "-nointeractive", "-maxtime", "300"]  # 5 minute max
+    
     if user_agent:
         cmd += ["-useragent", user_agent]
-    if fast:
-        cmd += ["-Tuning", "b"]
-    res = safe_run(cmd, timeout=600)  # Nikto can take longer
     
-    # Combine stdout and stderr
+    if fast:
+        # Fast mode: only check for interesting files/directories
+        cmd += ["-Tuning", "x"]
+    else:
+        # Normal mode: balanced scan (skip slow checks)
+        cmd += ["-Tuning", "x", "b", "c"]  # Interesting files, software identification, misc checks
+    
+    res = safe_run(cmd, timeout=360)  # 6 minute timeout (longer than maxtime)
+    
+    # Combine stdout and stderr - Nikto outputs to both
     combined = res.get("stdout", "") + "\n" + res.get("stderr", "")
     if combined.strip():
         out.write_text(combined, encoding="utf-8")
@@ -664,7 +673,7 @@ def parse_gobuster(raw: str) -> List[Dict[str, Any]]:
 
 
 def parse_nikto(raw: str) -> List[Dict[str, Any]]:
-    """Parse nikto output, filter out informational/low-priority findings."""
+    """Parse nikto output, filter out only the most noisy informational findings."""
     findings = []
     
     # Skip if tool error or not found
@@ -685,43 +694,63 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
         if not line or not line.startswith('+'):
             continue
         
-        # Filter out informational findings
+        # Skip only meta information and truly informational lines
         skip_patterns = [
-            'Server:',  # Server banner (already captured elsewhere)
-            'retrieved x-powered-by header',  # Low priority
-            'The anti-clickjacking',  # Already in SSL patterns
-            'No CGI Directories found',  # Negative finding
-            'allowed HTTP methods',  # Usually not a vuln
-            'uncommon header',  # Too noisy
-            'may be interesting',  # Too vague
+            'Target IP:',
+            'Target Hostname:',
+            'Target Port:',
+            'Start Time:',
+            'End Time:',
+            'Server: ',  # Just the server line, not findings about server
+            'Scan terminated:',
+            'host(s) tested',
+            '----------',
         ]
         
-        if any(pattern in line.lower() for pattern in skip_patterns):
+        # Check if this is a line to skip
+        should_skip = False
+        for pattern in skip_patterns:
+            if line.startswith('+ ' + pattern):
+                should_skip = True
+                break
+        
+        if should_skip:
             continue
         
-        # Only report findings with OSVDB references or specific vulnerabilities
-        if 'OSVDB-' in line or any(vuln in line.lower() for vuln in [
-            'vulnerability', 'exploit', 'injection', 'xss', 'sql', 
-            'directory traversal', 'file inclusion', 'authentication bypass',
-            'default password', 'backup file', 'sensitive'
+        # Determine risk level based on content
+        risk = "Medium"  # Default for Nikto findings
+        
+        # High risk indicators
+        if any(high_risk in line.lower() for high_risk in [
+            'sql injection', 'command injection', 'remote code execution',
+            'authentication bypass', 'arbitrary code', 'rce',
+            'file inclusion', 'directory traversal', '../',
+            'default password', 'default credential'
         ]):
-            risk = "Medium"
-            if any(high_risk in line.lower() for high_risk in [
-                'sql injection', 'command injection', 'authentication bypass',
-                'remote code execution', 'file inclusion'
-            ]):
-                risk = "High"
-            
-            findings.append({
-                "title": "Nikto finding",
-                "rule": "nikto_finding",
-                "risk": risk,
-                "details": line.strip('+ '),
-                "evidence": line
-            })
+            risk = "High"
+        
+        # Critical indicators
+        elif any(critical in line.lower() for critical in [
+            'shell', 'backdoor', 'malware', 'trojan'
+        ]):
+            risk = "Critical"
+        
+        # Low risk - informational headers (but still report them)
+        elif any(low_risk in line.lower() for low_risk in [
+            'retrieved x-powered-by', 'x-frame-options', 'x-content-type-options',
+            'uncommon header'
+        ]):
+            risk = "Low"
+        
+        findings.append({
+            "title": "Nikto: " + line.strip('+ ')[:80],
+            "rule": "nikto_finding",
+            "risk": risk,
+            "details": line.strip('+ '),
+            "evidence": line
+        })
     
-    # Run general pattern matching
-    findings += score_text_findings(raw)
+    # Don't use score_text_findings for Nikto (findings already extracted above)
     
     return dedupe_findings(findings)
 
