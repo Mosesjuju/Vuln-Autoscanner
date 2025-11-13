@@ -149,6 +149,94 @@ TEMPLATE_HTML = r"""
 
 # --------------------------- Helper utilities ---------------------------
 
+class AdaptiveRateLimiter:
+    """Adaptive rate limiter with WAF/IDS evasion capabilities."""
+    
+    def __init__(self, initial_delay: float = 0.5, stealth_mode: bool = False):
+        self.base_delay = initial_delay
+        self.current_delay = initial_delay
+        self.stealth_mode = stealth_mode
+        self.error_count = 0
+        self.success_count = 0
+        self.last_check = time.time()
+        self.blocked = False
+        
+        # WAF detection patterns
+        self.waf_indicators = [
+            'cloudflare', 'cloudfront', 'akamai', 'incapsula', 'sucuri',
+            'wordfence', 'mod_security', 'blocked', 'forbidden', 'captcha',
+            'rate limit', 'too many requests', 'ddos', 'protection',
+            'access denied', 'security', 'waf', 'firewall'
+        ]
+        
+        # Stealth delays (randomized)
+        if stealth_mode:
+            self.min_delay = 3.0
+            self.max_delay = 8.0
+            self.current_delay = random.uniform(self.min_delay, self.max_delay)
+    
+    def check_response(self, status_code: int = 200, response_text: str = "", response_time: float = 0.0):
+        """Analyze response for WAF/blocking indicators and adjust delays."""
+        current_time = time.time()
+        
+        # Check for blocking indicators
+        if status_code in [403, 429, 503]:
+            self.error_count += 1
+            self.blocked = True
+            # Exponential backoff
+            self.current_delay = min(self.current_delay * 2, 30.0)
+            if self.stealth_mode:
+                self.current_delay = min(self.current_delay * 1.5, self.max_delay * 3)
+            return
+        
+        # Check response text for WAF indicators
+        if response_text:
+            text_lower = response_text.lower()
+            for indicator in self.waf_indicators:
+                if indicator in text_lower:
+                    self.error_count += 1
+                    self.blocked = True
+                    self.current_delay = min(self.current_delay * 1.5, 20.0)
+                    return
+        
+        # Check response time (unusually slow = potential throttling)
+        if response_time > 5.0 and not self.stealth_mode:
+            self.current_delay = max(self.current_delay * 1.2, 2.0)
+            return
+        
+        # Success - gradually reduce delay if no issues
+        self.success_count += 1
+        if self.success_count > 5 and not self.stealth_mode:
+            self.current_delay = max(self.current_delay * 0.9, self.base_delay)
+            self.success_count = 0
+        
+        # Reset blocked status after successful requests
+        if self.blocked and self.success_count > 3:
+            self.blocked = False
+            self.error_count = 0
+    
+    def wait(self):
+        """Wait with current delay, adding randomization for stealth."""
+        if self.stealth_mode:
+            # Random jitter to avoid pattern detection
+            jitter = random.uniform(-0.5, 1.5)
+            actual_delay = max(0.1, self.current_delay + jitter)
+        else:
+            actual_delay = self.current_delay
+        
+        time.sleep(actual_delay)
+    
+    def get_status(self) -> Dict[str, Any]:
+        """Get current rate limiter status."""
+        return {
+            "current_delay": round(self.current_delay, 2),
+            "blocked": self.blocked,
+            "error_count": self.error_count,
+            "success_count": self.success_count,
+            "stealth_mode": self.stealth_mode
+        }
+
+
 def now_ts() -> str:
     return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
 
@@ -1123,6 +1211,7 @@ def cli_args():
     
     # Stealth and rate limiting options
     p.add_argument('--delay', type=float, default=0, help='Delay in seconds between tool executions (stealth mode)')
+    p.add_argument('--stealth', action='store_true', help='Enable adaptive stealth mode (WAF/IDS evasion with 3-8s randomized delays)')
     p.add_argument('--user-agent', default=None, help='Custom user agent (random if not specified)')
     p.add_argument('--throttle', type=float, default=0, help='Throttle/delay between requests (where supported)')
     
@@ -1188,7 +1277,18 @@ def main():
     wordlist = args.wordlist
     timeout = args.timeout
     delay = args.delay
+    stealth = args.stealth
     user_agent = args.user_agent or random.choice(USER_AGENTS)
+    
+    # Initialize adaptive rate limiter
+    if stealth:
+        rate_limiter = AdaptiveRateLimiter(initial_delay=3.0, stealth_mode=True)
+        if console:
+            console.print(f"[bold yellow]🛡️  Stealth Mode Enabled[/bold yellow] - Adaptive delays (3-8s) with WAF evasion")
+    elif delay > 0:
+        rate_limiter = AdaptiveRateLimiter(initial_delay=delay, stealth_mode=False)
+    else:
+        rate_limiter = None
 
     timestamp = now_ts()
     safe_target = re.sub(r'[^a-zA-Z0-9_.-]', '_', (target.replace('https://', '').replace('http://', '')))
@@ -1203,7 +1303,10 @@ def main():
         console.print(f"[bold cyan]═══════════════════════════════════════════════════[/bold cyan]")
         console.print(f"[yellow]Target:[/yellow] [bold]{target}[/bold]")
         console.print(f"[yellow]Output:[/yellow] [green]{outdir}[/green]")
-        console.print(f"[yellow]Mode:[/yellow] {'Fast' if fast else 'Normal'} | [yellow]Delay:[/yellow] {delay}s | [yellow]UA:[/yellow] {user_agent[:50]}...")
+        mode_str = 'Fast' if fast else 'Normal'
+        if stealth:
+            mode_str += ' + Stealth'
+        console.print(f"[yellow]Mode:[/yellow] {mode_str} | [yellow]Delay:[/yellow] {delay}s | [yellow]UA:[/yellow] {user_agent[:50]}...")
         
         # Show tool status
         if missing_tools:
@@ -1264,6 +1367,9 @@ def main():
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(7, len(tool_tasks))) as ex:
                 futures = {}
                 for tool_name, tool_func in tool_tasks:
+                    # Apply rate limiting between tool launches if enabled
+                    if rate_limiter:
+                        rate_limiter.wait()
                     futures[ex.submit(tool_func)] = tool_name
                 
                 for fut in concurrent.futures.as_completed(futures):
@@ -1278,12 +1384,21 @@ def main():
                             description=f"[{rc_color}]✓ {tool_name:<10}[/{rc_color}]"
                         )
                         
+                        # Check response for rate limiting indicators
+                        if rate_limiter:
+                            raw_output = res.get('raw', '')
+                            rc = res.get('rc', 0)
+                            rate_limiter.check_response(status_code=200 if rc == 0 else 500, response_text=raw_output)
+                        
                         # Show verbose info if enabled
                         if args.verbose and console:
                             cmd = res.get('meta', {}).get('cmd', 'N/A')
                             console.print(f"[dim]  └─ {tool_name}: {cmd}[/dim]")
                             if res.get('rc', 0) != 0:
                                 console.print(f"[dim]     Exit code: {res.get('rc', 0)}[/dim]")
+                            if rate_limiter and stealth:
+                                status = rate_limiter.get_status()
+                                console.print(f"[dim]     Limiter: delay={status['current_delay']}s, blocked={status['blocked']}[/dim]")
                     except Exception as e:
                         res = {"tool": tool_name, "raw": str(e), "rc": -1, "meta": {"error": str(e)}}
                         progress.update(
@@ -1293,6 +1408,10 @@ def main():
                         )
                         if args.verbose and console:
                             console.print(f"[dim]  └─ {tool_name} error: {str(e)}[/dim]")
+                        
+                        # Check for blocking indicators in error
+                        if rate_limiter:
+                            rate_limiter.check_response(status_code=500, response_text=str(e))
                     results.append(res)
     else:
         # Fallback without progress bars
@@ -1373,6 +1492,18 @@ def main():
             )
         
         console.print(table)
+        
+        # Show rate limiter statistics if stealth mode was used
+        if rate_limiter and stealth:
+            status = rate_limiter.get_status()
+            console.print(f"\n[bold yellow]🛡️  Stealth Mode Statistics:[/bold yellow]")
+            console.print(f"  Final delay: [cyan]{status['current_delay']}s[/cyan]")
+            console.print(f"  Successful requests: [green]{status['success_count']}[/green]")
+            console.print(f"  Blocked/errors: [{'red' if status['error_count'] > 0 else 'green'}]{status['error_count']}[/{'red' if status['error_count'] > 0 else 'green'}]")
+            console.print(f"  WAF detected: [{'red' if status['blocked'] else 'green'}]{'Yes' if status['blocked'] else 'No'}[/{'red' if status['blocked'] else 'green'}]")
+            if status['blocked']:
+                console.print(f"  [yellow]⚠️  Target may have WAF/IDS - consider increasing delays[/yellow]")
+        
         console.print(f"\n[bold]Reports:[/bold]")
         console.print(f"  📄 JSON: [green]{summary_json}[/green]")
         console.print(f"  🌐 HTML: [green]{summary_html}[/green]")
