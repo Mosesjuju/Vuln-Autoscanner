@@ -54,14 +54,17 @@ python scanner.py <target>
 # Fast scan with custom ports
 python scanner.py example.com --fast --ports 80,443,8080
 
-# Stealth mode
-python scanner.py target.com --delay 2 --user-agent "Custom UA"
+# Stealth mode with adaptive rate limiting (WAF evasion)
+python scanner.py target.com --stealth
+
+# Manual delay control
+python scanner.py target.com --delay 3 --user-agent "Custom UA"
 
 # Skip specific tools
 python scanner.py site.com --skip-ssl --skip-subdomains
 
-# Verbose output
-python scanner.py target.com --verbose
+# Verbose output with rate limiter stats
+python scanner.py target.com --stealth --verbose
 ```
 
 ## Options
@@ -70,13 +73,41 @@ python scanner.py target.com --verbose
 |--------|-------------|
 | `--fast` | Fast mode (less aggressive) |
 | `--ports` | Comma-separated ports (default: 80,443) |
-| `--delay` | Delay between tool executions (stealth) |
+| `--stealth` | **Adaptive stealth mode** with WAF/IDS evasion (3-8s random delays) |
+| `--delay` | Fixed delay between tool executions (seconds) |
 | `--user-agent` | Custom user agent |
 | `--skip-ssl` | Skip SSL/TLS analysis |
 | `--skip-subdomains` | Skip subdomain enumeration |
 | `--skip-fingerprint` | Skip technology fingerprinting |
-| `--verbose, -v` | Show verbose output |
+| `--verbose, -v` | Show verbose output with limiter statistics |
 | `--check-tools` | Check installed tools and exit |
+
+## Stealth Mode
+
+The `--stealth` flag enables adaptive rate limiting with WAF/IDS evasion:
+
+**Features:**
+- Randomized delays (3-8 seconds + jitter)
+- Detects 15+ WAF products (Cloudflare, Akamai, ModSecurity, etc.)
+- Automatic exponential backoff on blocking (403, 429, 503)
+- Response time monitoring for throttling detection
+- Gradual delay reduction on successful requests
+- Post-scan statistics showing detection status
+
+**When to use:**
+- Production/live targets with WAF/IDS
+- Sites with aggressive rate limiting
+- Avoiding IP bans during assessment
+- Maintaining low profile scans
+
+**Example output:**
+```
+🛡️  Stealth Mode Statistics:
+  Final delay: 4.7s
+  Successful requests: 12
+  Blocked/errors: 0
+  WAF detected: No
+```
 
 ## Output
 
