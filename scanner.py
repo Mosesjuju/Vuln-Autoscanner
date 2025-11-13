@@ -485,6 +485,19 @@ RISK_ORDER = ["Critical", "High", "Medium", "Low"]
 # Expanded patterns with recent CVEs (2020-2025) and common vulnerabilities
 PATTERNS = {
     # pattern: (title, risk, short_rule)
+    
+    # XSS Vulnerabilities (Enhanced Detection)
+    r"<script[^>]*>.*?</script>|<script[^>]*>": ("XSS: Script tag injection", "High", "xss_script"),
+    r"javascript:|data:text/html": ("XSS: JavaScript protocol", "High", "xss_js_proto"),
+    r"onerror\s*=|onload\s*=|onclick\s*=|onmouseover\s*=": ("XSS: Event handler injection", "High", "xss_event"),
+    r"<iframe[^>]*>|<object[^>]*>|<embed[^>]*>": ("XSS: Dangerous tags", "High", "xss_tags"),
+    r"eval\(|Function\(|setTimeout\(|setInterval\(": ("XSS: Dangerous JavaScript functions", "High", "xss_eval"),
+    r"document\.cookie|document\.write|innerHTML|outerHTML": ("XSS: DOM manipulation", "Medium", "xss_dom"),
+    r"<img[^>]*onerror|<svg[^>]*onload|<body[^>]*onload": ("XSS: Image/SVG exploit", "High", "xss_img_svg"),
+    r"<input[^>]*onfocus|<details[^>]*ontoggle": ("XSS: Form element exploit", "Medium", "xss_form"),
+    r"vbscript:|about:|view-source:": ("XSS: Alternative protocols", "Medium", "xss_protocols"),
+    r"<!--.*<script.*-->|\/\*.*<script.*\*\/": ("XSS: Comment obfuscation", "High", "xss_comment"),
+    
     # Generic CVE detection
     r"CVE-\d{4}-\d+": ("Known CVE detected", "Critical", "cve"),
     
@@ -505,7 +518,6 @@ PATTERNS = {
     r"command injection|shell injection|RCE|remote code execution": ("Command/RCE vulnerability", "Critical", "rce"),
     r"LDAP injection|ldapi": ("LDAP Injection", "High", "ldap_inj"),
     r"XML injection|XXE|XML External Entity": ("XML/XXE Injection", "High", "xxe"),
-    r"XSS|Cross-Site Scripting|<script>": ("Cross-Site Scripting (XSS)", "High", "xss"),
     r"SSRF|Server-Side Request Forgery": ("Server-Side Request Forgery", "High", "ssrf"),
     
     # Authentication & Authorization
