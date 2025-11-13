@@ -1,2 +1,0 @@
-/usr/bin/whatweb:257:in `require_relative': cannot load such file -- /usr/bin/lib/messages (LoadError)
-	from /usr/bin/whatweb:257:in `<main>'
