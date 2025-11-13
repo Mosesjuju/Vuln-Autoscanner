@@ -608,12 +608,65 @@ def parse_nmap(raw: str) -> List[Dict[str, Any]]:
 
 
 def parse_gobuster(raw: str) -> List[Dict[str, Any]]:
-    # gobuster raw shows found URLs; check for /admin, backup files, etc.
-    return score_text_findings(raw)
+    """Parse gobuster output, only report sensitive/interesting paths."""
+    findings = []
+    
+    # Skip if tool error or not found
+    if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]") or raw.startswith("[No Results]"):
+        if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]"):
+            return [{
+                "title": "Gobuster tool issue",
+                "rule": "tool_error",
+                "risk": "Low",
+                "details": raw.split('\n')[0],
+                "evidence": ""
+            }]
+        return []
+    
+    # Only flag paths with status codes that indicate actual findings
+    # 200: Accessible resource, 301/302: Redirects (may reveal structure), 401/403: Protected resources
+    interesting_paths = []
+    for line in raw.splitlines():
+        # Gobuster format: /path (Status: 200) [Size: 1234]
+        match = re.search(r'(/[\w\-\./_]*)\s+\(Status:\s+(\d{3})\)', line)
+        if match:
+            path = match.group(1)
+            status = match.group(2)
+            
+            # Only report interesting findings
+            if status in ['200', '301', '302', '401', '403']:
+                # Check if path matches sensitive patterns
+                if any(pattern in path.lower() for pattern in [
+                    'admin', 'config', 'backup', '.git', '.env', 'api', 
+                    'login', 'upload', 'private', 'secret', '.bak', 'old',
+                    'database', 'db', 'sql', 'phpmyadmin', 'test', 'dev'
+                ]):
+                    interesting_paths.append((path, status))
+    
+    # Add findings for interesting paths
+    for path, status in interesting_paths:
+        risk = "Medium"
+        if any(p in path.lower() for p in ['admin', 'config', 'backup', '.git', '.env', 'database']):
+            risk = "High"
+        
+        findings.append({
+            "title": f"Sensitive path discovered: {path}",
+            "rule": "sensitive_path",
+            "risk": risk,
+            "details": f"HTTP {status} - Path may contain sensitive resources",
+            "evidence": path
+        })
+    
+    # Run pattern matching only on full output (not per line)
+    findings += score_text_findings(raw)
+    
+    return dedupe_findings(findings)
 
 
 def parse_nikto(raw: str) -> List[Dict[str, Any]]:
-    # nikto has phrases like "OSVDB-", "+ " etc.
+    """Parse nikto output, filter out informational/low-priority findings."""
+    findings = []
+    
     # Skip if tool error or not found
     if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]") or raw.startswith("[No Results]"):
         if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]"):
@@ -626,25 +679,96 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
             }]
         return []
     
-    return score_text_findings(raw)
+    # Parse nikto findings line by line
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line or not line.startswith('+'):
+            continue
+        
+        # Filter out informational findings
+        skip_patterns = [
+            'Server:',  # Server banner (already captured elsewhere)
+            'retrieved x-powered-by header',  # Low priority
+            'The anti-clickjacking',  # Already in SSL patterns
+            'No CGI Directories found',  # Negative finding
+            'allowed HTTP methods',  # Usually not a vuln
+            'uncommon header',  # Too noisy
+            'may be interesting',  # Too vague
+        ]
+        
+        if any(pattern in line.lower() for pattern in skip_patterns):
+            continue
+        
+        # Only report findings with OSVDB references or specific vulnerabilities
+        if 'OSVDB-' in line or any(vuln in line.lower() for vuln in [
+            'vulnerability', 'exploit', 'injection', 'xss', 'sql', 
+            'directory traversal', 'file inclusion', 'authentication bypass',
+            'default password', 'backup file', 'sensitive'
+        ]):
+            risk = "Medium"
+            if any(high_risk in line.lower() for high_risk in [
+                'sql injection', 'command injection', 'authentication bypass',
+                'remote code execution', 'file inclusion'
+            ]):
+                risk = "High"
+            
+            findings.append({
+                "title": "Nikto finding",
+                "rule": "nikto_finding",
+                "risk": risk,
+                "details": line.strip('+ '),
+                "evidence": line
+            })
+    
+    # Run general pattern matching
+    findings += score_text_findings(raw)
+    
+    return dedupe_findings(findings)
 
 
 def parse_nuclei(raw: str) -> List[Dict[str, Any]]:
-    # nuclei tends to print template ids and severities; use patterns and parse lines
+    """Parse nuclei output, only report medium/high/critical findings."""
     findings = []
+    
+    # Skip if tool error or not found
+    if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]") or raw.startswith("[No Results]"):
+        if raw.startswith("[Tool Not Found]") or raw.startswith("[Tool Error]"):
+            return [{
+                "title": "Nuclei tool issue",
+                "rule": "tool_error",
+                "risk": "Low",
+                "details": raw.split('\n')[0],
+                "evidence": ""
+            }]
+        return []
+    
     for line in raw.splitlines():
         # Example nuclei line: "[high] CVE-2020-1234 - /path - template-id"
         if not line.strip():
             continue
+        
         # severity in brackets
-        m = re.search(r"\[(critical|high|medium|low)\]", line, flags=re.IGNORECASE)
+        m = re.search(r"\[(critical|high|medium|low|info)\]", line, flags=re.IGNORECASE)
         if m:
-            sev = m.group(1).capitalize()
+            sev = m.group(1).lower()
+            
+            # Skip low and info severity findings
+            if sev in ['low', 'info']:
+                continue
+            
+            # Extract template/vulnerability name
             title = re.sub(r"\[.*?\]", "", line).strip()
-            findings.append({"title": title[:120], "rule": "nuclei_line", "risk": _map_severity_to_risk(sev), "details": line.strip(), "evidence": line.strip()})
-        else:
-            # fallback pattern matching
-            findings += score_text_findings(line)
+            risk = _map_severity_to_risk(sev)
+            
+            findings.append({
+                "title": f"Nuclei: {title[:100]}",
+                "rule": "nuclei_vuln",
+                "risk": risk,
+                "details": line.strip(),
+                "evidence": line.strip()
+            })
+    
+    # Don't run score_text_findings on nuclei output (too noisy)
     return dedupe_findings(findings)
 
 
@@ -674,19 +798,24 @@ def parse_sslscan(raw: str) -> List[Dict[str, Any]]:
         return findings
     
     # Check for known SSL/TLS vulnerabilities
+    # Note: Check for positive vulnerability indicators, exclude "not vulnerable" statements
     vuln_patterns = {
-        r"Vulnerable to.*Heartbleed": ("Heartbleed vulnerability (CVE-2014-0160)", "Critical", "heartbleed"),
-        r"Vulnerable to.*POODLE": ("POODLE vulnerability", "High", "poodle"),
-        r"Vulnerable to.*BEAST": ("BEAST vulnerability", "Medium", "beast"),
-        r"SSLv2|SSLv3": ("Insecure SSL version enabled", "High", "ssl_version"),
-        r"TLS 1.0|TLS 1.1": ("Outdated TLS version", "Medium", "tls_old"),
+        r"(?<!not )(?<!NOT )[Vv]ulnerable to.*[Hh]eartbleed": ("Heartbleed vulnerability (CVE-2014-0160)", "Critical", "heartbleed"),
+        r"(?<!not )(?<!NOT )[Vv]ulnerable to.*POODLE": ("POODLE vulnerability", "High", "poodle"),
+        r"(?<!not )(?<!NOT )[Vv]ulnerable to.*BEAST": ("BEAST vulnerability", "Medium", "beast"),
+        r"SSLv2 enabled|SSLv3 enabled": ("Insecure SSL version enabled", "High", "ssl_version"),
+        r"TLS 1\.0 enabled|TLS 1\.1 enabled": ("Outdated TLS version", "Medium", "tls_old"),
         r"Certificate expired|Certificate has expired": ("Expired SSL certificate", "High", "cert_expired"),
         r"Self-signed certificate": ("Self-signed certificate", "Medium", "self_signed"),
-        r"NULL|ANON|EXPORT|DES|RC4|MD5": ("Weak cipher suite", "Medium", "weak_cipher"),
+        r"Accepted.*(?:NULL|ANON|EXPORT|DES-|RC4|MD5)": ("Weak cipher suite", "Medium", "weak_cipher"),
     }
     
     for pat, (title, risk, rule) in vuln_patterns.items():
         for m in re.finditer(pat, raw, flags=re.IGNORECASE):
+            # Additional check: skip if line contains "not vulnerable"
+            line = raw[max(0, m.start()-100):m.end()+100]
+            if "not vulnerable" in line.lower():
+                continue
             findings.append({
                 "title": title,
                 "rule": rule,
@@ -736,7 +865,7 @@ def parse_subfinder(raw: str) -> List[Dict[str, Any]]:
 
 
 def parse_whatweb(raw: str) -> List[Dict[str, Any]]:
-    """Parse whatweb output for technology fingerprinting."""
+    """Parse whatweb output, only report outdated/vulnerable technologies."""
     findings = []
     
     # Skip if tool error or not found
@@ -751,26 +880,33 @@ def parse_whatweb(raw: str) -> List[Dict[str, Any]]:
             })
         return findings
     
-    # Technology patterns with risk assessment
-    tech_patterns = {
-        r"WordPress": ("WordPress CMS detected", "Low", "wordpress"),
-        r"Joomla": ("Joomla CMS detected", "Low", "joomla"),
-        r"Drupal": ("Drupal CMS detected", "Low", "drupal"),
-        r"jQuery\[([^\]]+)\]": ("jQuery library detected", "Low", "jquery"),
-        r"PHP\[([^\]]+)\]": ("PHP version detected", "Low", "php_version"),
-        r"Apache\[([^\]]+)\]": ("Apache version detected", "Low", "apache_version"),
-        r"nginx\[([^\]]+)\]": ("Nginx version detected", "Low", "nginx_version"),
-        r"Microsoft-IIS": ("IIS web server detected", "Low", "iis"),
-        r"Bootstrap": ("Bootstrap framework detected", "Low", "bootstrap"),
-        r"AngularJS|Angular": ("Angular framework detected", "Low", "angular"),
-        r"React": ("React framework detected", "Low", "react"),
-        r"Vue\.js": ("Vue.js framework detected", "Low", "vue"),
+    # Known vulnerable/outdated technology versions
+    vulnerable_versions = {
+        # CMS versions with known vulnerabilities
+        r"WordPress\[([0-5]\.[\d\.]+)\]": ("Outdated WordPress version", "High", "wordpress_old"),
+        r"Joomla\[([0-3]\.[\d\.]+)\]": ("Outdated Joomla version", "High", "joomla_old"),
+        r"Drupal\[([0-9]\.[\d\.]+)\]": ("Outdated Drupal version", "High", "drupal_old"),
+        
+        # PHP versions EOL (< 7.4 as of 2024)
+        r"PHP\[([0-6]\.[\d\.]+)\]|PHP\[7\.[0-3]\.[\d]+\]": ("End-of-life PHP version", "High", "php_eol"),
+        
+        # Old jQuery versions with XSS vulnerabilities
+        r"jQuery\[([0-2]\.[\d\.]+)\]|jQuery\[3\.0\.[\d]+\]": ("Vulnerable jQuery version", "Medium", "jquery_vuln"),
+        
+        # Old Apache versions
+        r"Apache\[([0-1]\.[\d\.]+)\]|Apache\[2\.[0-3]\.[\d]+\]": ("Outdated Apache version", "Medium", "apache_old"),
+        
+        # Old Nginx versions
+        r"nginx\[([0-1]\.[\d\.]+)\]": ("Outdated Nginx version", "Medium", "nginx_old"),
+        
+        # IIS old versions
+        r"Microsoft-IIS\[([0-7]\.[\d]+)\]": ("Outdated IIS version", "Medium", "iis_old"),
     }
     
-    for pat, (title, risk, rule) in tech_patterns.items():
+    for pat, (title, risk, rule) in vulnerable_versions.items():
         for m in re.finditer(pat, raw, flags=re.IGNORECASE):
             version = m.group(1) if m.groups() else ""
-            details = f"{title}" + (f" (version: {version})" if version else "")
+            details = f"{title}: {version}" if version else title
             findings.append({
                 "title": title,
                 "rule": rule,
@@ -779,16 +915,35 @@ def parse_whatweb(raw: str) -> List[Dict[str, Any]]:
                 "evidence": m.group(0)
             })
     
-    # Generic scoring for other findings (but skip diagnostic messages)
-    if not raw.startswith("["):
-        findings += score_text_findings(raw)
+    # Don't use generic score_text_findings for whatweb (too noisy)
+    # Only report actual vulnerabilities found above
     
     return dedupe_findings(findings)
 
 
 def parse_nmap_enhanced(raw: str, xml_path: Optional[str] = None) -> List[Dict[str, Any]]:
-    """Enhanced nmap parser that uses XML output if available."""
+    """Enhanced nmap parser that uses XML output if available. Filters out low-risk open ports."""
     findings = []
+    
+    # High-risk ports that should always be flagged
+    HIGH_RISK_PORTS = {
+        '21': 'FTP - Insecure file transfer',
+        '23': 'Telnet - Unencrypted remote access',
+        '69': 'TFTP - Trivial file transfer',
+        '135': 'MS-RPC - Windows RPC',
+        '139': 'NetBIOS - File sharing',
+        '445': 'SMB - File sharing (ransomware vector)',
+        '1433': 'MS-SQL - Database server',
+        '3306': 'MySQL - Database server',
+        '3389': 'RDP - Remote Desktop',
+        '5432': 'PostgreSQL - Database server',
+        '5900': 'VNC - Remote access',
+        '6379': 'Redis - Database (often unsecured)',
+        '27017': 'MongoDB - Database (often unsecured)',
+    }
+    
+    # Medium-risk services
+    MEDIUM_RISK_SERVICES = ['mysql', 'postgresql', 'redis', 'mongodb', 'mssql', 'oracle']
     
     # Try to parse XML for structured data
     if xml_path and os.path.exists(xml_path):
@@ -809,19 +964,25 @@ def parse_nmap_enhanced(raw: str, xml_path: Optional[str] = None) -> List[Dict[s
                         service_version = service.get('version', '') if service is not None else ''
                         product = service.get('product', '') if service is not None else ''
                         
-                        # Determine risk based on port and service
-                        risk = "Low"
-                        if portid in ['21', '23', '445', '3389']:  # FTP, Telnet, SMB, RDP
+                        # Only report high-risk ports and services
+                        if portid in HIGH_RISK_PORTS:
+                            risk = "High"
+                            title = f"High-risk port {portid}/{protocol} open"
+                            details = f"{HIGH_RISK_PORTS[portid]}: {product} {service_version}".strip()
+                        elif service_name in MEDIUM_RISK_SERVICES:
                             risk = "Medium"
-                        if service_name in ['ssh', 'telnet', 'ftp'] and not service_version:
-                            risk = "Medium"
-                        
-                        title = f"Open port {portid}/{protocol} - {service_name}"
-                        details = f"Service: {product} {service_version}".strip() if product or service_version else service_name
+                            title = f"Database service exposed: {service_name}"
+                            details = f"Port {portid}: {product} {service_version}".strip()
+                        elif service_name in ['ssh', 'http', 'https', 'smtp', 'pop3', 'imap']:
+                            # Common services - skip unless version is outdated
+                            continue
+                        else:
+                            # Skip all other standard ports
+                            continue
                         
                         findings.append({
                             "title": title,
-                            "rule": "open_port",
+                            "rule": "risky_port",
                             "risk": risk,
                             "details": details,
                             "evidence": f"Port {portid} is open running {service_name}"
@@ -836,8 +997,12 @@ def parse_nmap_enhanced(raw: str, xml_path: Optional[str] = None) -> List[Dict[s
                 "evidence": ""
             })
     
-    # Always run text-based scoring as well
-    findings += score_text_findings(raw)
+    # Run text-based scoring only for actual vulnerabilities (not just open ports)
+    text_findings = score_text_findings(raw)
+    # Filter out generic "open port" mentions from score_text_findings
+    text_findings = [f for f in text_findings if not (f.get('rule') == 'open_port' and f.get('risk') == 'Low')]
+    findings += text_findings
+    
     return dedupe_findings(findings)
 
 
