@@ -356,8 +356,14 @@ def run_nikto(target: str, outdir: Path, fast: bool = False, user_agent: str = N
     out = outdir / "nikto.txt"
     host = target if re.match(r'https?://', target) else f"http://{target}"
     
-    # Use faster options to reduce scan time
-    cmd = ["nikto", "-h", host, "-nointeractive", "-maxtime", "300"]  # 5 minute max
+    # Use faster options and better error handling
+    cmd = [
+        "nikto", "-h", host, 
+        "-nointeractive",
+        "-maxtime", "300",  # 5 minute max
+        "-timeout", "10",    # Connection timeout per request
+        "-Pause", "2"        # Pause 2 seconds between requests (reduces errors)
+    ]
     
     if user_agent:
         cmd += ["-useragent", user_agent]
@@ -689,10 +695,18 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
         return []
     
     # Parse nikto findings line by line
+    error_count = 0
     for line in raw.splitlines():
         line = line.strip()
         if not line or not line.startswith('+'):
             continue
+        
+        # Track error messages but still continue parsing
+        if 'ERROR:' in line or 'error(s)' in line.lower():
+            error_count += 1
+            # Skip error lines themselves, but continue parsing findings
+            if line.startswith('+ ERROR:'):
+                continue
         
         # Skip only meta information and truly informational lines
         skip_patterns = [
@@ -705,6 +719,7 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
             'Scan terminated:',
             'host(s) tested',
             '----------',
+            'No CGI Directories found',  # Negative finding
         ]
         
         # Check if this is a line to skip
@@ -725,7 +740,7 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
             'sql injection', 'command injection', 'remote code execution',
             'authentication bypass', 'arbitrary code', 'rce',
             'file inclusion', 'directory traversal', '../',
-            'default password', 'default credential'
+            'default password', 'default credential', 'wildcard'
         ]):
             risk = "High"
         
@@ -738,7 +753,7 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
         # Low risk - informational headers (but still report them)
         elif any(low_risk in line.lower() for low_risk in [
             'retrieved x-powered-by', 'x-frame-options', 'x-content-type-options',
-            'uncommon header'
+            'uncommon header', 'redirects to'
         ]):
             risk = "Low"
         
@@ -748,6 +763,16 @@ def parse_nikto(raw: str) -> List[Dict[str, Any]]:
             "risk": risk,
             "details": line.strip('+ '),
             "evidence": line
+        })
+    
+    # Add informational note if errors were encountered
+    if error_count > 0 and findings:
+        findings.append({
+            "title": "Nikto scan incomplete",
+            "rule": "nikto_partial",
+            "risk": "Low",
+            "details": f"Scan encountered {error_count} error(s) and may be incomplete. Consider using --delay for better results.",
+            "evidence": ""
         })
     
     # Don't use score_text_findings for Nikto (findings already extracted above)
