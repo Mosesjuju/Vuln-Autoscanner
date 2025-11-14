@@ -288,10 +288,13 @@ def run_nmap(target: str, outdir: Path, ports: str = "80,443", fast: bool = Fals
         time.sleep(delay)
     out_txt = outdir / "nmap.txt"
     out_xml = outdir / "nmap.xml"
-    flags = ["-sV"]
+    # Extract hostname from URL (nmap doesn't accept http:// prefix)
+    hostname = target.replace('https://', '').replace('http://', '').split('/')[0]
+    # Fast mode uses -F (top 100 ports), otherwise use explicit ports with service detection
     if fast:
-        flags = ["-F"]
-    cmd = ["nmap"] + flags + ["-p", ports, "-oN", str(out_txt), "-oX", str(out_xml), target]
+        cmd = ["nmap", "-F", "-oN", str(out_txt), "-oX", str(out_xml), hostname]
+    else:
+        cmd = ["nmap", "-sV", "-p", ports, "-oN", str(out_txt), "-oX", str(out_xml), hostname]
     res = safe_run(cmd)
     # Read produced output files if present
     txt = out_txt.read_text(encoding="utf-8") if out_txt.exists() else res.get("stdout", "")
