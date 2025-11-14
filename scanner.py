@@ -49,8 +49,17 @@ try:
     from rich.live import Live
     from rich.panel import Panel
     from rich.layout import Layout
+    RICH_AVAILABLE = True
 except Exception:
-    Console = None
+    Console = None  # type: ignore
+    Table = None  # type: ignore
+    Progress = None  # type: ignore
+    SpinnerColumn = None  # type: ignore
+    BarColumn = None  # type: ignore
+    TextColumn = None  # type: ignore
+    TimeElapsedColumn = None  # type: ignore
+    TaskProgressColumn = None  # type: ignore
+    RICH_AVAILABLE = False
 
 console = Console() if Console else None
 
@@ -290,7 +299,7 @@ def run_nmap(target: str, outdir: Path, ports: str = "80,443", fast: bool = Fals
     return {"tool": "nmap", "raw": txt + "\n" + xml, "rc": res.get("rc", 0), "meta": {"cmd": res.get("cmd"), "xml_path": str(out_xml) if out_xml.exists() else None}}
 
 
-def run_gobuster(target: str, outdir: Path, wordlist: str = None, fast: bool = False, user_agent: str = None, delay: float = 0) -> Dict[str, Any]:
+def run_gobuster(target: str, outdir: Path, wordlist: Optional[str] = None, fast: bool = False, user_agent: Optional[str] = None, delay: float = 0) -> Dict[str, Any]:
     """Run gobuster (dir) against the target. If target looks like a host, convert to http://target/"""
     if delay > 0:
         time.sleep(delay)
@@ -431,14 +440,16 @@ security.txt
         cmd += ["-t", "10"]
     res = safe_run(cmd)
     # If gobuster wrote nothing but stdout has entries, save stdout
-    if res.get("stdout"):
-        out.write_text(res.get("stdout"), encoding="utf-8")
-    elif res.get("stderr"):
-        out.write_text(res.get("stderr"), encoding="utf-8")
+    stdout = res.get("stdout")
+    stderr = res.get("stderr")
+    if stdout:
+        out.write_text(stdout, encoding="utf-8")
+    elif stderr:
+        out.write_text(stderr, encoding="utf-8")
     return {"tool": "gobuster", "raw": (out.read_text(encoding="utf-8") if out.exists() else res.get("stdout", "")), "rc": res.get("rc", 0), "meta": {"cmd": res.get("cmd"), "wordlist": chosen, "user_agent": user_agent}}
 
 
-def run_nikto(target: str, outdir: Path, fast: bool = False, user_agent: str = None, delay: float = 0) -> Dict[str, Any]:
+def run_nikto(target: str, outdir: Path, fast: bool = False, user_agent: Optional[str] = None, delay: float = 0) -> Dict[str, Any]:
     if delay > 0:
         time.sleep(delay)
     out = outdir / "nikto.txt"
@@ -492,10 +503,12 @@ def run_nuclei(target: str, outdir: Path, fast: bool = False, delay: float = 0) 
     if fast:
         cmd += ["-t", "critical"]
     res = safe_run(cmd)
-    if res.get("stdout"):
-        out.write_text(res.get("stdout"), encoding="utf-8")
-    elif res.get("stderr"):
-        out.write_text(res.get("stderr"), encoding="utf-8")
+    stdout = res.get("stdout")
+    stderr = res.get("stderr")
+    if stdout:
+        out.write_text(stdout, encoding="utf-8")
+    elif stderr:
+        out.write_text(stderr, encoding="utf-8")
     return {"tool": "nuclei", "raw": (out.read_text(encoding="utf-8") if out.exists() else res.get("stdout", "")), "rc": res.get("rc", 0), "meta": {"cmd": res.get("cmd")}}
 
 
@@ -551,7 +564,7 @@ def run_subfinder(target: str, outdir: Path, delay: float = 0) -> Dict[str, Any]
     return {"tool": "subfinder", "raw": raw_output, "rc": res.get("rc", 0), "meta": {"cmd": res.get("cmd"), "domain": domain}}
 
 
-def run_whatweb(target: str, outdir: Path, user_agent: str = None, delay: float = 0) -> Dict[str, Any]:
+def run_whatweb(target: str, outdir: Path, user_agent: Optional[str] = None, delay: float = 0) -> Dict[str, Any]:
     """Run whatweb for technology fingerprinting."""
     if delay > 0:
         time.sleep(delay)
@@ -1164,11 +1177,12 @@ def generate_json_summary(target: str, timestamp: str, results: List[Dict[str, A
     summary = []
     for r in results:
         findings = r.get('parsed', [])
+        raw = r.get('raw', '')
         summary.append({
             'tool': r.get('tool'),
             'findings': findings,
             'highest_risk': highest_risk(findings),
-            'raw_output': (r.get('raw')[:100000])
+            'raw_output': raw[:100000] if raw else ''
         })
     payload = {
         'target': target,
@@ -1186,11 +1200,12 @@ def generate_html_report(target: str, timestamp: str, results: List[Dict[str, An
     summary = []
     for r in results:
         findings = r.get('parsed', [])
+        raw = r.get('raw', '')
         summary.append({
             'tool': r.get('tool'),
             'findings': findings,
             'highest_risk': highest_risk(findings),
-            'raw_output': r.get('raw')[:50000]
+            'raw_output': raw[:50000] if raw else ''
         })
     tpl = Template(TEMPLATE_HTML)
     html = tpl.render(target=target, timestamp=timestamp, tools=[r.get('tool') for r in results], summary=summary)
@@ -1235,7 +1250,7 @@ def main():
     
     # If --check-tools flag, just show tool status and exit
     if args.check_tools:
-        if console:
+        if console and Table:
             console.print("\n[bold]Security Tools Status:[/bold]\n")
             table = Table(show_header=True, header_style="bold cyan")
             table.add_column("Tool", style="cyan")
@@ -1348,7 +1363,7 @@ def main():
         sys.exit(1)
 
     # Modern progress bars with live stats
-    if console and Progress:
+    if console and Progress and SpinnerColumn and TextColumn and BarColumn and TaskProgressColumn and TimeElapsedColumn:
         with Progress(
             SpinnerColumn(),
             TextColumn("[bold blue]{task.description}"),
@@ -1466,7 +1481,7 @@ def main():
     summary_html = generate_html_report(target, timestamp, parsed_results, outdir)
 
     # Display final summary
-    if console:
+    if console and Table:
         console.print(f"\n[bold green]Scan complete![/bold green]\n")
         
         # Summary table
