@@ -1217,6 +1217,90 @@ def generate_html_report(target: str, timestamp: str, results: List[Dict[str, An
     return out
 
 
+def show_drift(parsed_results: List[Dict[str, Any]], outdir: Path, target: str) -> Dict[str, Any]:
+    """
+    Compare current scan with previous scan to detect drift (new/removed findings).
+    Saves current scan as baseline for next comparison.
+    """
+    import hashlib
+    
+    # Generate current scan fingerprints
+    current_findings = []
+    for result in parsed_results:
+        tool = result.get('tool', 'unknown')
+        for finding in result.get('parsed', []):
+            # Create unique fingerprint for each finding
+            fingerprint = {
+                'tool': tool,
+                'title': finding.get('title', ''),
+                'risk': finding.get('risk', 'Low'),
+                'details': finding.get('details', ''),
+                'evidence': finding.get('evidence', '')[:200]  # Truncate evidence for comparison
+            }
+            # Create hash for deduplication
+            fp_str = f"{tool}:{finding.get('title', '')}:{finding.get('details', '')}"
+            fp_hash = hashlib.md5(fp_str.encode()).hexdigest()
+            fingerprint['hash'] = fp_hash
+            current_findings.append(fingerprint)
+    
+    # Paths for drift tracking
+    latest_file = outdir.parent / 'scan_latest.json'
+    previous_file = outdir.parent / 'scan_previous.json'
+    
+    drift_report = {
+        'added': [],
+        'removed': [],
+        'unchanged': 0,
+        'first_scan': False
+    }
+    
+    try:
+        # Load previous scan
+        if previous_file.exists():
+            with open(previous_file) as f:
+                previous_data = json.load(f)
+                previous_findings = previous_data.get('findings', [])
+            
+            # Create hash sets for comparison
+            current_hashes = {f['hash']: f for f in current_findings}
+            previous_hashes = {f['hash']: f for f in previous_findings}
+            
+            # Detect changes
+            added_hashes = set(current_hashes.keys()) - set(previous_hashes.keys())
+            removed_hashes = set(previous_hashes.keys()) - set(current_hashes.keys())
+            unchanged_hashes = set(current_hashes.keys()) & set(previous_hashes.keys())
+            
+            drift_report['added'] = [current_hashes[h] for h in added_hashes]
+            drift_report['removed'] = [previous_hashes[h] for h in removed_hashes]
+            drift_report['unchanged'] = len(unchanged_hashes)
+        else:
+            drift_report['first_scan'] = True
+    except Exception as e:
+        drift_report['error'] = str(e)
+        drift_report['first_scan'] = True
+    
+    # Save current scan as latest
+    latest_data = {
+        'target': target,
+        'timestamp': datetime.datetime.now().isoformat(),
+        'findings': current_findings,
+        'total_findings': len(current_findings)
+    }
+    
+    with open(latest_file, 'w') as f:
+        json.dump(latest_data, f, indent=2)
+    
+    # Copy latest to previous for next comparison
+    if not drift_report['first_scan']:
+        import shutil
+        shutil.copy(latest_file, previous_file)
+    else:
+        with open(previous_file, 'w') as f:
+            json.dump(latest_data, f, indent=2)
+    
+    return drift_report
+
+
 # --------------------------- CLI & Orchestration ---------------------------
 
 def cli_args():
@@ -1483,6 +1567,9 @@ def main():
     summary_json = generate_json_summary(target, timestamp, parsed_results, outdir)
     summary_html = generate_html_report(target, timestamp, parsed_results, outdir)
 
+    # Drift detection - compare with previous scan
+    drift_report = show_drift(parsed_results, outdir, target)
+
     # Display final summary
     if console and Table:
         console.print(f"\n[bold green]Scan complete![/bold green]\n")
@@ -1510,6 +1597,36 @@ def main():
             )
         
         console.print(table)
+        
+        # Drift detection display
+        if drift_report.get('first_scan'):
+            console.print(f"\n[bold cyan]📊 Drift Detection:[/bold cyan]")
+            console.print(f"  [yellow]First scan — no history to compare[/yellow]")
+            console.print(f"  Baseline saved for future comparisons")
+        elif 'error' in drift_report:
+            console.print(f"\n[bold cyan]📊 Drift Detection:[/bold cyan]")
+            console.print(f"  [red]Error: {drift_report['error']}[/red]")
+        else:
+            added_count = len(drift_report.get('added', []))
+            removed_count = len(drift_report.get('removed', []))
+            unchanged_count = drift_report.get('unchanged', 0)
+            
+            console.print(f"\n[bold cyan]📊 Drift Detection:[/bold cyan]")
+            console.print(f"  [green]Unchanged: {unchanged_count}[/green]")
+            console.print(f"  [yellow]+{added_count} new findings[/yellow]")
+            console.print(f"  [red]-{removed_count} removed findings[/red]")
+            
+            # Show details of new findings
+            if added_count > 0 and added_count <= 5:
+                console.print(f"\n  [bold yellow]New Findings:[/bold yellow]")
+                for finding in drift_report['added'][:5]:
+                    risk_color = {"Critical": "red", "High": "orange1", "Medium": "yellow", "Low": "green"}.get(finding['risk'], 'white')
+                    console.print(f"    • [{risk_color}]{finding['risk']}[/{risk_color}] [{finding['tool']}] {finding['title'][:60]}")
+            elif added_count > 5:
+                console.print(f"\n  [bold yellow]New Findings (showing first 5 of {added_count}):[/bold yellow]")
+                for finding in drift_report['added'][:5]:
+                    risk_color = {"Critical": "red", "High": "orange1", "Medium": "yellow", "Low": "green"}.get(finding['risk'], 'white')
+                    console.print(f"    • [{risk_color}]{finding['risk']}[/{risk_color}] [{finding['tool']}] {finding['title'][:60]}")
         
         # Show rate limiter statistics if stealth mode was used
         if rate_limiter and stealth:
