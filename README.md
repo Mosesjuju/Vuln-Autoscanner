@@ -65,4 +65,8 @@ results/<target>_<timestamp>/
 
 ## License
 
-MIT - [@Mosesjuju](https://github.com/Mosesjuju)
+MIT
+
+## Author
+
+[@Mosesjuju](https://github.com/Mosesjuju)
