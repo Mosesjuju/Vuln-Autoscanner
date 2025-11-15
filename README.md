@@ -65,7 +65,7 @@ results/<target>_<timestamp>/
 
 ## License
 
-MIT
+[MIT License](LICENSE)
 
 ## Author
 
